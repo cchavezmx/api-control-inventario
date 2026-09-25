@@ -99,6 +99,23 @@ que se muestre en el PDF debe pasar por acá.
     "profit_amount":    0,      "indirect_amount": 0
   },
 
+  // ── Snapshot para el PDF service (NO recalcular) ───────────────
+  "snapshot_mode": true,
+  "line_items": [
+    { "label": "Casetas",         "unit_price": 1000, "qty": 1,   "unit": "fijo", "notes": "", "total": 1000 },
+    { "label": "Operador",        "unit_price": 1000, "qty": 1,   "unit": "dia",  "notes": "", "total": 1000 },
+    { "label": "Per diem",        "unit_price": 1000, "qty": 1,   "unit": "dia",  "notes": "", "total": 1000 },
+    { "label": "Gasolina",        "unit_price": 1200, "qty": 10,  "unit": "dia",  "notes": "", "total": 1200 },
+    { "label": "Renta de unidad", "unit_price": 1000, "qty": 1,   "unit": "dia",  "period": "dia", "notes": "", "total": 1000 }
+  ],
+  "totals": {
+    "concepts_subtotal": 5200,
+    "subtotal_travel":   4000,
+    "profit_amount":     320,
+    "indirect_amount":   480,
+    "grand_total":       4800
+  },
+
   // ── Pre-vuelo (sub-schema del doc) ─────────────────────────────
   "pre_flight": {
     "fuel_level":        50,
@@ -206,6 +223,40 @@ PDFs vea el problema:
   "raw":     "..."
 }
 ```
+
+## Snapshot de costos (modo "no recalcular")
+
+A partir de esta versión, el payload incluye tres campos nuevos para evitar
+recálculos en el PDF service:
+
+- `snapshot_mode: true` — flag semántico que indica que los valores ya están
+  resueltos.
+- `line_items` — arreglo de conceptos listos para iterar en una tabla. Cada
+  elemento ya trae `unit_price`, `qty`, `unit` y `total`.
+- `totals` — totales finales: `concepts_subtotal`, `subtotal_travel`,
+  `profit_amount`, `indirect_amount` y `grand_total`.
+
+### Regla para el PDF service
+
+> Cuando `snapshot_mode` es `true`, **usar `line_items` y `totals` tal cual**.
+> No volver a calcular días a partir de `request_date` / `delivery_date`, ni
+> multiplicar `unit_rent_amount` por ninguna cantidad derivada de fechas.
+> Los cálculos ya los hizo el frontend y los validó el backend.
+
+### Ejemplo: renta por día
+
+Si el backend envía:
+
+```json
+{
+  "unit_rent_amount": 41,
+  "unit_rent_qty": 450,
+  "subtotal_travel": 18450
+}
+```
+
+El PDF service debe mostrar **41 × 450 = 18450**, usando el `total` ya
+pre-calculado en `line_items` y `totals.subtotal_travel`.
 
 ## Cómo extender el payload
 

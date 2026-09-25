@@ -1,193 +1,122 @@
-# Plan: Batch de Pruebas para api-control-inventario
+# Plan: Snapshot de costos para el PDF service de flotillas
 
 ## Resumen
 
-El proyecto tiene **~4,500 líneas de código** en controllers, services y routes, **cero pruebas existentes**, y **Jest ya configurado** (`testEnvironment: "node"`). El objetivo es construir un batch de pruebas que cubra controllers, services y routes de forma pragmática.
+Convertir el payload que enviamos a `PDF_SERVICE + /vehicle-invoice/` en un **snapshot completo y no recalculable**: cada concepto de costo debe ir con su total ya resuelto, junto con un flag `snapshot_mode: true` que le indique al servicio de PDFs que solo debe renderizar, no calcular.
 
-## Estado Actual
+Esto evita que el PDF service vuelva a derivar malos valores como "renta por día = precio unitario × días calculados de las fechas", que es el problema actual.
 
-- `test.js` está vacío.
-- `test/` solo contiene `serviceAccountKey.json` (credenciales Firebase).
-- `package.json` tiene Jest configurado pero sin utilidades de testing HTTP ni mocking de MongoDB.
-- Los controllers tienen manejo de errores inconsistente (muchos retornan `res.status(400).json({ message: error })` con el objeto de error crudo).
-- Muchas rutas tienen `verifyToken` comentado; la autenticación es JWT vía `middlewares/authUser.js`.
-- Hay múltiples dependencias externas: Twilio, SendGrid, Monday.com, Puppeteer, Firebase, Cloudinary, Google Cloud Storage, y un servicio externo de PDFs (`PDF_SERVICE`).
+## Problema actual
 
-## Enfoque Propuesto
+- `FlotillasController.printPlan` toma el documento de Mongo, lo pasa por `PDFServices.vehicleData` y lo envía por HTTP al servicio externo de PDFs.
+- El frontend ya envía los cálculos correctos (`subtotal_travel`, `profit_amount`, `indirect_amount`, `unit_rent_amount`, `unit_rent_qty`, etc.) y `mapDocumentBody` los guarda tal cual.
+- `PDFServices.vehicleData` solo recalcula `profit_amount` e `indirect_amount` cuando vienen en `0`, y ahora ya los redondea a 2 decimales.
+- El PDF service parece estar recalculando la renta a partir de las fechas (`request_date` / `delivery_date`) en lugar de usar `unit_rent_qty` y `subtotal_travel` que ya le enviamos.
 
-### 1. Infraestructura de Testing (Fase 1)
+## Solución propuesta
 
-**Herramientas a instalar:**
-- `supertest` — para testear endpoints HTTP sin levantar el servidor.
-- `mongodb-memory-server` — para tests de integración con una base MongoDB real en memoria (alternativa: `jest-mongodb`, pero `mongodb-memory-server` da más control).
-- `@shelf/jest-mongodb` (opcional) — si se prefiere la configuración zero-config de Jest.
+Enriquecer el return de `PDFServices.vehicleData` con dos nuevas secciones:
 
-**Configuración de Jest:**
-- Ajustar `jest.config.js` o la sección `jest` en `package.json` para:
-  - `setupFilesAfterEnv: ['<rootDir>/test/setup.js']` — inicializa conexión a MongoDB en memoria y limpia colecciones entre tests.
-  - `testMatch: ['**/__tests__/**/*.test.js']` o `test/**/*.test.js`.
-  - `coveragePathIgnorePatterns: ['/node_modules/', '/test/fixtures/']`.
+1. **`snapshot_mode: true`** — flag semántico para el PDF service.
+2. **`line_items`** — arreglo de conceptos listos para iterar y renderizar en tabla, cada uno con `label`, `unit_price`, `qty`, `unit`, `total`.
+3. **`totals`** — objeto con todos los totales finales:
+   - `concepts_subtotal`
+   - `subtotal_travel`
+   - `profit_amount`
+   - `indirect_amount`
+   - `grand_total`
 
-**Archivos a crear:**
-- `test/setup.js` — conecta `mongodb-memory-server`, inicializa Mongoose, y expone helper de teardown.
-- `test/fixtures/` — factories para crear documentos de prueba (User, Inventario, Flotilla, Flete, Traslado, Rentas, Paqueteria, etc.).
-- `test/helpers/` — funciones reutilizables:
-  - `generateToken(user)` — crea un JWT válido para rutas protegidas.
-  - `mockExternalServices()` — reemplaza Twilio, SendGrid, Puppeteer, etc. con mocks de Jest.
+El PDF service podrá entonces pintar la tabla directamente desde `line_items` y el resumen desde `totals`, sin necesidad de mirar fechas ni volver a multiplicar nada.
 
-### 2. Estrategia de Mocking
+## Cálculos del snapshot
 
-| Dependencia | Estrategia |
-|---|---|
-| **Mongoose / MongoDB** | `mongodb-memory-server` para tests de integración; `jest.spyOn(Model, 'find')` para unitarios de services. |
-| **Twilio** | `jest.mock('twilio')` en `test/setup.js` o mock por test. |
-| **SendGrid** | `jest.mock('@sendgrid/mail')` |
-| **Monday.com (fetch)** | `jest.mock('node-fetch')` o `nock` |
-| **Puppeteer** | `jest.mock('puppeteer')` — stub de `browser.newPage()` y `page.pdf()` |
-| **Firebase** | `jest.mock('../database/firebase')` |
-| **Cloudinary** | `jest.mock('../database/cloudinary')` |
-| **Axios (PDF_SERVICE, EmailController)** | `jest.mock('axios')` o `nock` |
-| **Google Cloud Storage (multer)** | Bypass en tests de integración; no subir archivos reales. |
+```js
+const unitRentTotal = unit_rent_amount * unit_rent_qty
+const operatorTotal = operator_rate * operator_days
+const perDiemTotal  = per_diem_rate * per_diem_days
+const gasolineTotal = gasoline_unit === 'km'
+  ? gasoline_rate * gasoline_km
+  : gasoline_rate
+const casetasTotal  = casetas_amount
 
-### 3. Prioridad de Módulos a Testear
-
-El orden propuesto va de menor dependencia externa a mayor, y de core a periférico:
-
-**Nivel 1 — Unitarios puros (services sin I/O externo):**
-1. `services/AlmacenService.js` — CRUD directo sobre `Inventarios`.
-2. `services/UserService.js` — CRUD sobre `User` e `InvoiceStorage`.
-3. `services/FamiliasService.js` — CRUD y agregaciones sobre `Familia`.
-4. `services/Paqueteria.js` — CRUD sobre `Paqueteria`.
-5. `services/AllFoliosService.js` — contadores simples.
-
-**Nivel 2 — Controllers + routes (supertest + memoria):**
-6. `controllers/AlmacenController.js` + `routes/almacenRoutes.js` — CRUD de inventario.
-7. `controllers/UserController.js` + `routes/UserRoutes.js` — registro, login, JWT.
-8. `controllers/ControlVHController.js` + `routes/ControlVHRoute.js` — CRUD simple.
-9. `controllers/ChecaController.js` + `routes/ChecaRoutes.js` — asistencia y reportería Excel.
-10. `controllers/RHController.js` + `routes/RHRoutes.js` — empleados y departamentos.
-
-**Nivel 3 — Services con agregaciones complejas:**
-11. `services/FlotillasService.js` — dynamic model selection (`traslado/flete/renta`).
-12. `services/RHService.js` — agregaciones de `AttendanceEmployee` con lookups.
-13. `services/CatalogoSerivice.js` — agregaciones y búsquedas de texto.
-14. `services/MacbettyService.js` — agregaciones sobre `Mackbetty`.
-
-**Nivel 4 — Controllers con dependencias externas (mocks heavy):**
-15. `controllers/MessageController.js` + `routes/webRoutes.js` — Twilio, Monday.com, PDFs, Puppeteer, paquetería.
-16. `controllers/FlotillasController.js` + `routes/FlotillasRoutes.js` — PDFs externos, vehículos, planes.
-17. `controllers/EmailController.js` — MailerSend + axios a PDF_SERVICE.
-18. `controllers/InventarioITController.js` + `routes/inventarioITRoutes.js` — Cloudinary, Firebase, Puppeteer (responsivas).
-
-**Nivel 5 — Auth y middlewares:**
-19. `middlewares/authUser.js` — `verifyToken` con JWT válido/inválido/expirado.
-
-### 4. Estructura de Archivos de Prueba Propuesta
-
-```
-test/
-├── setup.js              # Inicialización de mongodb-memory-server + mocks globales
-├── fixtures/
-│   ├── users.js          # factory de usuarios con bcrypt
-│   ├── inventario.js     # factory de productos
-│   ├── flotillas.js      # factories de Flotilla, Flete, Traslado, Rentas, Planes
-│   ├── catalogo.js       # factories de Catalogo, Brand, Label, Familia
-│   └── checa.js          # factories de ChecaEmployees, AttendanceEmployee, ChecaSites
-├── helpers/
-│   ├── auth.js           # generateToken(user), authHeader(token)
-│   ├── mongo.js          # clearDatabase(), closeDatabase()
-│   └── mocks.js          # setupExternalMocks()
-├── unit/
-│   ├── services/
-│   │   ├── AlmacenService.test.js
-│   │   ├── UserService.test.js
-│   │   ├── FamiliasService.test.js
-│   │   ├── Paqueteria.test.js
-│   │   └── AllFoliosService.test.js
-│   └── utils/
-│       └── index.test.js   # comparePassword, createToken, dateFormat
-├── integration/
-│   ├── routes/
-│   │   ├── almacenRoutes.test.js
-│   │   ├── UserRoutes.test.js
-│   │   ├── ControlVHRoute.test.js
-│   │   ├── ChecaRoutes.test.js
-│   │   ├── RHRoutes.test.js
-│   │   ├── FlotillasRoutes.test.js
-│   │   └── webRoutes.test.js
-│   └── controllers/
-│       ├── AlmacenController.test.js
-│       ├── UserController.test.js
-│       └── MessageController.test.js
-└── coverage/
+const conceptsSubtotal = unitRentTotal + operatorTotal + perDiemTotal + gasolineTotal + casetasTotal
+const profitFinal = profit_amount // ya persistido o recalculado en vehicleData
+const indirectFinal = indirect_amount // ya persistido o recalculado en vehicleData
+const grandTotal = subtotal_travel_raw + profitFinal + indirectFinal
 ```
 
-### 5. Patrones de Prueba por Capa
+> Nota: usamos los valores **persistidos** del documento. No recalculamos desde cero, salvo que `vehicleData` haya tenido que recalcular utilidad/indirectos por venir en `0`.
 
-**Unit tests de services:**
-- Mockear el modelo Mongoose (`jest.spyOn(Model, 'find').mockResolvedValue([...])`).
-- Verificar que el service delega correctamente y transforma respuestas.
-- No testear Mongoose en sí; testear la lógica del service (ej. `switch(type)` en `FlotillasService`).
+## Archivos a modificar
 
-**Integration tests de controllers/routes:**
-- Usar `supertest(app)` donde `app` es la instancia Express sin llamar a `app.listen()`.
-- Conectar a `mongodb-memory-server` antes de todos los tests del archivo.
-- Limpiar todas las colecciones (`await Model.deleteMany()`) en `afterEach`.
-- Para rutas con `verifyToken`, generar un token válido vía `createToken` y enviarlo en `Authorization: Bearer <token>`.
-- Para rutas que suben archivos, usar `supertest.attach()` con un buffer pequeño.
+### 1. `services/PDFServices.js`
 
-**Tests de middlewares:**
-- Pasar objetos `req`, `res`, `next` manualmente; verificar `res.status()` y `req.decoded`.
+- Agregar helper interno `calculateSnapshotTotals(plainCostBreakdown, subtotal, profit, indirect)`.
+- Agregar helper interno `buildLineItems(plainCostBreakdown)`.
+- En `vehicleData`, incluir en el return:
+  - `snapshot_mode: true`
+  - `line_items`
+  - `totals`
+- Mantener todos los campos actuales (`cost_breakdown`, `subtotal_travel`, etc.) para compatibilidad hasta que el PDF service migre a usar `line_items`/`totals`.
 
-### 6. Casos Edge a Cubrir
+### 2. `docs/print-plan-payload.md`
 
-- `FlotillasService.create/get` con `type` inválido o `undefined`.
-- `FlotillasController.create` con `body` vacío o `type` faltante.
-- `UserController.register` con `password !== confirmPassword`.
-- `UserController.login` con credenciales inválidas.
-- `ChecaController.registerEmployeeChecaApp` con QR inexistente.
-- `MessageController.createInvoice` con Puppeteer mocked (verificar que se llama `page.pdf()`).
-- `MessageController.paqueteria` con `sendNotification` mocked.
-- Rutas protegidas sin token → `401`.
-- Rutas protegidas con token inválido → `401`.
+- Documentar la nueva sección `snapshot_mode`, `line_items` y `totals`.
+- Actualizar el ejemplo JSON.
+- Agregar nota para el equipo del PDF service: "Cuando `snapshot_mode` es `true`, usar `line_items` y `totals`; no recalcular conceptos a partir de fechas".
 
-### 7. Scripts de package.json a agregar
+### 3. `test/unit/PDFServices.test.js`
 
-```json
-"scripts": {
-  "test": "jest --verbose",
-  "test:unit": "jest --verbose test/unit",
-  "test:integration": "jest --verbose test/integration",
-  "test:watch": "jest --watch",
-  "test:coverage": "jest --coverage"
+- Agregar tests para el snapshot:
+  - `snapshot_mode` es `true`.
+  - `line_items` contiene cada concepto con su total correcto.
+  - `totals.concepts_subtotal` es la suma de los conceptos.
+  - `totals.grand_total = subtotal_travel_raw + profit + indirect`.
+  - Renta: `unit_rent_amount * unit_rent_qty` refleja el valor real (caso del payload con 41 × 450 = 18450).
+
+### 4. `controllers/FlotillasController.js`
+
+- No cambia la lógica de negocio, solo mantener el envío al PDF service. Se deja intacto salvo si se decide también agregar un header `X-Snapshot-Mode: true`.
+
+## Contrato nuevo del payload (resumen)
+
+```jsonc
+{
+  // ... campos existentes ...
+  "snapshot_mode": true,
+  "line_items": [
+    { "label": "Casetas",        "unit_price": 0,    "qty": 0,  "unit": "fijo", "total": 0 },
+    { "label": "Operador",       "unit_price": 0,    "qty": 0,  "unit": "dia",  "total": 0 },
+    { "label": "Per diem",       "unit_price": 0,    "qty": 0,  "unit": "dia",  "total": 0 },
+    { "label": "Gasolina",       "unit_price": 0,    "qty": 1,  "unit": "dia",  "total": 0 },
+    { "label": "Renta de unidad","unit_price": 41,   "qty": 450,"unit": "dia",  "total": 18450 }
+  ],
+  "totals": {
+    "concepts_subtotal": 18450,
+    "subtotal_travel": 18450,
+    "profit_amount": 1476,
+    "indirect_amount": 2214,
+    "grand_total": 22140
+  }
 }
 ```
 
-### 8. Plan de Ejecución (iterativo)
+## Backward compatibility
 
-| Iteración | Entregable |
-|---|---|
-| **1** | Instalar dependencias (`supertest`, `mongodb-memory-server`, opcional `nock`). Crear `test/setup.js`, `test/helpers/`, `test/fixtures/`. |
-| **2** | Tests unitarios de services del Nivel 1 (Almacen, User, Familias, Paqueteria, AllFolios). |
-| **3** | Tests de integración de routes del Nivel 2 (Almacen, User, ControlVH, Checa, RH). |
-| **4** | Tests unitarios de services del Nivel 3 (Flotillas, RH, Catalogo, Macbetty) + agregaciones. |
-| **5** | Tests de integración de routes/controllers del Nivel 4 con mocks externos (Message, Flotillas, Email, InventarioIT). |
-| **6** | Tests de middlewares (`authUser.js`) + cobertura global. |
+- Los campos actuales (`cost_breakdown`, `subtotal_travel`, `subtotal_travel_raw`, `description.planPrice`) se mantienen iguales.
+- El PDF service puede seguir usándolos mientras migra, pero el flag `snapshot_mode` y los nuevos objetos le dan la información completa para no recalcular.
 
-### 9. Riesgos y Mitigaciones
+## Riesgos / preguntas abiertas
 
-| Riesgo | Mitigación |
-|---|---|
-| `server.js` conecta a MongoDB Atlas al importar `app` | En tests, importar solo `routes` y crear un `express()` de prueba, o mock `mongoose.connect` antes de importar `server.js`. |
-| `imageStorage.js` escribe `gcpstorage.json` en disco | Mock `fs` o `multer-google-storage` en tests de integración que involucren upload. |
-| Muchos controllers retornan `res.status(400).json({ message: error })` con objetos de error crudos | Los tests deben usar `expect.objectContaining` o verificar solo `statusCode`; no asumir estructura fija del body. |
-| `Bussiness` model inline en `FlotillasService.js` | El mock debe funcionar a nivel de `mongoose.model` o testearse vía integración con memoria. |
-| Variabilidad de `NODE_ENV` | Forzar `NODE_ENV=test` en `test/setup.js` y usar una URI de `mongodb-memory-server` en vez de `config/index.js`. |
+1. ¿El PDF service que recibe el payload está bajo control del equipo para que pueda ignorar `cost_breakdown` y usar `line_items`/`totals`?
+2. ¿El "total final" esperado es `subtotal_travel + profit + indirect`, o el `subtotal_travel` ya incluye esos montos? El snapshot lo hará explícito y el PDF service puede elegir.
+3. ¿Se requiere también enviar los días calculados desde fechas, o con `unit_rent_qty` ya es suficiente?
 
----
+## Criterios de aceptación
 
-## Pregunta al usuario
-
-1. ¿Prefieres que los tests de integración usen **mongodb-memory-server** (más realista) o **mocks de Mongoose** (más rápidos)?
-2. ¿Hay algún módulo que NO quieras testear (ej. `Macbetty`, `Monday.com`) porque está deprecado o poco usado?
-3. ¿Quieres que también generemos un reporte de **cobertura de código** (`jest --coverage`) como parte del entregable?
+- [ ] `PDFServices.vehicleData` incluye `snapshot_mode: true`.
+- [ ] `line_items` tiene todos los conceptos con totales pre-calculados.
+- [ ] `totals` tiene subtotales y total final explícitos.
+- [ ] Los tests unitarios cubren el snapshot, incluyendo el caso de renta 41 × 450.
+- [ ] La documentación del payload está actualizada.
+- [ ] `npm test` sigue pasando.

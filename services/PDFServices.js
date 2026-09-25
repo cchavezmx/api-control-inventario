@@ -957,6 +957,104 @@ module.exports = {
         currency: "MXN",
       }).format(num);
     };
+    const toNumber = (v) => {
+      const n = parseFloat(v);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    const rawSubtotal = parseFloat(subtotal_travel || 0);
+
+    // Normalizar montos finales de utilidad e indirectos (reusados en snapshot y cost_breakdown)
+    const finalProfitAmount =
+      (data?.profit_amount || plainCostBreakdown.profit_amount || 0) > 0 ||
+      rawSubtotal === 0
+        ? (data?.profit_amount || plainCostBreakdown.profit_amount || 0)
+        : Math.round(rawSubtotal * ((profit_pct ?? 8) / 100) * 100) / 100;
+
+    const finalIndirectAmount =
+      (data?.indirect_amount || plainCostBreakdown.indirect_amount || 0) > 0 ||
+      rawSubtotal === 0
+        ? (data?.indirect_amount || plainCostBreakdown.indirect_amount || 0)
+        : Math.round(rawSubtotal * ((indirect_pct ?? 12) / 100) * 100) / 100;
+
+    // Snapshot: totales por concepto, listos para renderizar en el PDF service sin recalcular
+    const casetasTotal = toNumber(plainCostBreakdown.casetas_amount);
+    const operatorTotal =
+      toNumber(plainCostBreakdown.operator_rate) *
+      toNumber(plainCostBreakdown.operator_days);
+    const perDiemTotal =
+      toNumber(plainCostBreakdown.per_diem_rate) *
+      toNumber(plainCostBreakdown.per_diem_days);
+    const gasolineTotal =
+      plainCostBreakdown.gasoline_unit === "km"
+        ? toNumber(plainCostBreakdown.gasoline_rate) *
+          toNumber(plainCostBreakdown.gasoline_km)
+        : toNumber(plainCostBreakdown.gasoline_rate);
+    const unitRentTotal =
+      toNumber(plainCostBreakdown.unit_rent_amount) *
+      toNumber(plainCostBreakdown.unit_rent_qty);
+
+    const conceptsSubtotal =
+      casetasTotal + operatorTotal + perDiemTotal + gasolineTotal + unitRentTotal;
+    const grandTotal = rawSubtotal + finalProfitAmount + finalIndirectAmount;
+
+    const lineItems = [
+      {
+        label: "Casetas",
+        unit_price: toNumber(plainCostBreakdown.casetas_amount),
+        qty:
+          plainCostBreakdown.casetas_unit === "fijo"
+            ? 1
+            : toNumber(plainCostBreakdown.casetas_days || 1),
+        unit: plainCostBreakdown.casetas_unit || "fijo",
+        notes: plainCostBreakdown.casetas_notes || "",
+        total: casetasTotal,
+      },
+      {
+        label: "Operador",
+        unit_price: toNumber(plainCostBreakdown.operator_rate),
+        qty: toNumber(plainCostBreakdown.operator_days),
+        unit: plainCostBreakdown.operator_unit || "dia",
+        notes: plainCostBreakdown.operator_notes || "",
+        total: operatorTotal,
+      },
+      {
+        label: "Per diem",
+        unit_price: toNumber(plainCostBreakdown.per_diem_rate),
+        qty: toNumber(plainCostBreakdown.per_diem_days),
+        unit: plainCostBreakdown.per_diem_unit || "dia",
+        notes: plainCostBreakdown.per_diem_notes || "",
+        total: perDiemTotal,
+      },
+      {
+        label: "Gasolina",
+        unit_price: toNumber(plainCostBreakdown.gasoline_rate),
+        qty:
+          plainCostBreakdown.gasoline_unit === "km"
+            ? toNumber(plainCostBreakdown.gasoline_km)
+            : toNumber(plainCostBreakdown.gasoline_km || 1),
+        unit: plainCostBreakdown.gasoline_unit || "fijo",
+        notes: plainCostBreakdown.gasoline_notes || "",
+        total: gasolineTotal,
+      },
+      {
+        label: "Renta de unidad",
+        unit_price: toNumber(plainCostBreakdown.unit_rent_amount),
+        qty: toNumber(plainCostBreakdown.unit_rent_qty),
+        unit: plainCostBreakdown.unit_rent_unit || "dia",
+        period: plainCostBreakdown.unit_rent_period || "dia",
+        notes: plainCostBreakdown.unit_rent_notes || "",
+        total: unitRentTotal,
+      },
+    ];
+
+    const snapshotTotals = {
+      concepts_subtotal: conceptsSubtotal,
+      subtotal_travel: rawSubtotal,
+      profit_amount: finalProfitAmount,
+      indirect_amount: finalIndirectAmount,
+      grand_total: grandTotal,
+    };
 
     return {
       _id,
@@ -1014,13 +1112,12 @@ module.exports = {
         unit_rent_unit: plainCostBreakdown.unit_rent_unit || 'dia',
         unit_rent_qty: plainCostBreakdown.unit_rent_qty || 0,
         // El subtotal real en modo desglose es la suma de conceptos, no subtotal_travel.
-        profit_amount: (data?.profit_amount || plainCostBreakdown.profit_amount || 0) > 0 || parseFloat(subtotal_travel || 0) === 0
-          ? (data?.profit_amount || plainCostBreakdown.profit_amount || 0)
-          : Math.round(parseFloat(subtotal_travel || 0) * ((profit_pct ?? 8) / 100) * 100) / 100,
-        indirect_amount: (data?.indirect_amount || plainCostBreakdown.indirect_amount || 0) > 0 || parseFloat(subtotal_travel || 0) === 0
-          ? (data?.indirect_amount || plainCostBreakdown.indirect_amount || 0)
-          : Math.round(parseFloat(subtotal_travel || 0) * ((indirect_pct ?? 12) / 100) * 100) / 100
+        profit_amount: finalProfitAmount,
+        indirect_amount: finalIndirectAmount
       },
+      snapshot_mode: true,
+      line_items: lineItems,
+      totals: snapshotTotals,
       pre_flight: pre_flight
         ? (pre_flight.toObject ? pre_flight.toObject() : JSON.parse(JSON.stringify(pre_flight)))
         : {},
