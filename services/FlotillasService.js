@@ -24,28 +24,50 @@ const mapDocumentBody = (type, body = {}) => {
     const n = Number(v)
     return Number.isFinite(n) ? n : 0
   }
+  // Los importes finales los manda el wizard dentro de cost_breakdown
+  // (docs/pdf-payload-spec.md §3.4). Sin default a 0: si no llegan, no se
+  // guardan y el servicio de PDF usa su fallback para legacy.
+  const toOptionalNumber = (v) => {
+    if (v === '' || v === null || v === undefined) return undefined
+    const n = Number(v)
+    return Number.isFinite(n) ? n : undefined
+  }
+  // El wizard envía el desglose anidado en body.cost_breakdown; el shape
+  // plano (body.casetas_amount, etc.) sigue soportado por compatibilidad.
+  const cb = body.cost_breakdown && typeof body.cost_breakdown === 'object'
+    ? body.cost_breakdown
+    : {}
 
   const cost_breakdown = {
-    casetas_amount:   toNumber(body.casetas_amount),
-    casetas_unit:     body.casetas_unit || 'fijo',
-    casetas_notes:    body.casetas_notes || '',
-    operator_rate:    toNumber(body.operator_rate),
-    operator_unit:    body.operator_unit || 'dia',
-    operator_days:    toNumber(body.operator_days),
-    per_diem_rate:    toNumber(body.per_diem_rate),
-    per_diem_unit:    body.per_diem_unit || 'dia',
-    per_diem_days:    toNumber(body.per_diem_days),
-    gasoline_rate:    toNumber(body.gasoline_rate),
-    gasoline_unit:    body.gasoline_unit || 'fijo',
-    gasoline_km:      body.gasoline_unit === 'km'
-      ? toNumber(body.gasoline_km ?? body.recorrido_km)
-      : toNumber(body.gasoline_km ?? 1),
-    unit_rent_amount: toNumber(body.unit_rent_amount),
-    unit_rent_period: body.unit_rent_period || 'dia',
-    unit_rent_unit:   body.unit_rent_unit || 'dia',
-    unit_rent_qty:    toNumber(body.unit_rent_qty),
-    profit_amount:    toNumber(body.profit_amount),
-    indirect_amount:  toNumber(body.indirect_amount)
+    casetas_amount:   toNumber(cb.casetas_amount ?? body.casetas_amount),
+    casetas_unit:     cb.casetas_unit || body.casetas_unit || 'fijo',
+    casetas_notes:    cb.casetas_notes || body.casetas_notes || '',
+    operator_rate:    toNumber(cb.operator_rate ?? body.operator_rate),
+    operator_unit:    cb.operator_unit || body.operator_unit || 'dia',
+    operator_days:    toNumber(cb.operator_days ?? body.operator_days),
+    per_diem_rate:    toNumber(cb.per_diem_rate ?? body.per_diem_rate),
+    per_diem_unit:    cb.per_diem_unit || body.per_diem_unit || 'dia',
+    per_diem_days:    toNumber(cb.per_diem_days ?? body.per_diem_days),
+    gasoline_rate:    toNumber(cb.gasoline_rate ?? body.gasoline_rate),
+    gasoline_unit:    cb.gasoline_unit || body.gasoline_unit || 'fijo',
+    gasoline_km:      (cb.gasoline_unit || body.gasoline_unit) === 'km'
+      ? toNumber(cb.gasoline_km ?? body.gasoline_km ?? body.recorrido_km)
+      : toNumber(cb.gasoline_km ?? body.gasoline_km ?? 1),
+    unit_rent_amount: toNumber(cb.unit_rent_amount ?? body.unit_rent_amount),
+    unit_rent_period: cb.unit_rent_period || body.unit_rent_period || 'dia',
+    unit_rent_unit:   cb.unit_rent_unit || body.unit_rent_unit || 'dia',
+    unit_rent_qty:    toNumber(cb.unit_rent_qty ?? body.unit_rent_qty),
+    profit_amount:    toNumber(cb.profit_amount ?? body.profit_amount),
+    indirect_amount:  toNumber(cb.indirect_amount ?? body.indirect_amount),
+    casetas_importe:   toOptionalNumber(cb.casetas_importe ?? body.casetas_importe),
+    operator_importe:  toOptionalNumber(cb.operator_importe ?? body.operator_importe),
+    per_diem_importe:  toOptionalNumber(cb.per_diem_importe ?? body.per_diem_importe),
+    gasoline_importe:  toOptionalNumber(cb.gasoline_importe ?? body.gasoline_importe),
+    unit_rent_importe: toOptionalNumber(cb.unit_rent_importe ?? body.unit_rent_importe),
+    subtotal_amount:   toOptionalNumber(cb.subtotal_amount ?? body.subtotal_amount),
+    base_amount:       toOptionalNumber(cb.base_amount ?? body.base_amount),
+    iva_amount:        toOptionalNumber(cb.iva_amount ?? body.iva_amount),
+    total_amount:      toOptionalNumber(cb.total_amount ?? body.total_amount)
   }
 
   const checklistItems = {
